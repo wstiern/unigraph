@@ -1,0 +1,11 @@
+version: "2"
+
+services:
+    unigraph:
+        build: .
+        command: dlv debug /app --listen=:8001 --headless=true --api-version=2 --log
+        volumes:
+            - .:/app
+        ports:
+            - "8000:8000"
+            - "8001:8001"
