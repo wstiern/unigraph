@@ -10,23 +10,58 @@ import (
 	"github.com/machinebox/graphql"
 )
 
+type AssetDetails struct {
+	Token struct {
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		Symbol         string `json:"symbol"`
+		VolumeUSD      string `json:"volumeUSD"`
+		WhitelistPools []struct {
+			Token0 struct {
+				Name   string `json:"name"`
+				Symbol string `json:"symbol"`
+			} `json:"token0"`
+			Token1 struct {
+				Name   string `json:"name"`
+				Symbol string `json:"symbol"`
+			} `json:"token1"`
+		} `json:"whitelistPools"`
+	} `json:"token"`
+}
+
+type BlockDetails struct {
+	Transactions []struct {
+		Swaps []struct {
+			Amount0   string `json:"amount0"`
+			Amount1   string `json:"amount1"`
+			Timestamp string `json:"timestamp"`
+			Token0    struct {
+				Symbol string `json:"symbol"`
+			} `json:"token0"`
+			Token1 struct {
+				Symbol string `json:"symbol"`
+			} `json:"token1"`
+		} `json:"swaps"`
+	} `json:"transactions"`
+}
+
 type AssetResponse struct {
-	Name            string   `json:"Name"`
-	Symbol          string   `json:"Symbol"`
-	ContractAddress string   `json:"ContractAddress"`
-	VolumeUSD       string   `json:"VolumeUSD"`
-	Pools           []string `json:"Pools"`
+	Name            string   `json:"name"`
+	Symbol          string   `json:"symbol"`
+	ContractAddress string   `json:"contractAddress"`
+	VolumeUSD       string   `json:"volumeUSD"`
+	Pools           []string `json:"pools"`
 }
 
 type BlockResponse struct {
-	BlockHeight   string   `json:"BlockHeight"`
-	Swaps         []string `json:"Swaps"`
-	AssetsSwapped []string `json:"AssetsSwapped"`
+	BlockHeight   string   `json:"blockHeight"`
+	Swaps         []string `json:"swaps"`
+	AssetsSwapped []string `json:"assetsSwapped"`
 }
 
 var graphAPI = "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-alt"
 
-func dedupe(input []string) []string {
+func Dedupe(input []string) []string {
 
 	duped := map[string]bool{}
 	result := []string{}
@@ -41,8 +76,9 @@ func dedupe(input []string) []string {
 	return result
 }
 
-func getAssetByID(ctx *gin.Context) {
+func GetAssetByID(ctx *gin.Context) {
 
+	// prep gql query
 	assetId := ctx.Param("id")
 	query := fmt.Sprintf(`
 	{
@@ -64,10 +100,11 @@ func getAssetByID(ctx *gin.Context) {
 		}
 	  }`, assetId)
 
+	// send it
 	client := graphql.NewClient(graphAPI)
 	request := graphql.NewRequest(query)
 
-	var result map[string]interface{}
+	var result AssetDetails
 
 	if err := client.Run(
 		context.Background(),
@@ -77,56 +114,42 @@ func getAssetByID(ctx *gin.Context) {
 		return
 	}
 
-	tokenData := result["token"].(map[string]interface{})
-
-	tokenName := tokenData["name"]
-	tokenSymbol := tokenData["symbol"]
-	tokenContractAddress := tokenData["id"]
-	tokenVolumeUSD := tokenData["volumeUSD"]
-	tokenWhitelistPools := tokenData["whitelistPools"].([]interface{})
+	// parse results
+	tokenName := result.Token.Name
+	tokenSymbol := result.Token.Symbol
+	tokenContractAddress := result.Token.ID
+	tokenVolumeUSD := result.Token.VolumeUSD
 
 	var pairs []string
 
-	// unpack whitelistPools[]
-	for _, pool := range tokenWhitelistPools {
-
-		var in string
-		var out string
-
-		// unpack pool{}
-		if pair, ok := pool.(map[string]interface{}); ok {
-			for index, token := range pair {
-
-				if coin, ok := token.(map[string]interface{}); ok {
-
-					if index == "token0" {
-						in = coin["symbol"].(string)
-					} else {
-						out = coin["symbol"].(string)
-					}
-				}
-			}
-		}
+	// collect list of active pairs in all pools
+	for _, pool := range result.Token.WhitelistPools {
+		in := pool.Token0.Symbol
+		out := pool.Token1.Symbol
 		currentPair := fmt.Sprintf("%s:%s", in, out)
 		pairs = append(pairs, currentPair)
 	}
 
+	// sort + dedupe list
 	sort.Strings(pairs)
-	p := dedupe(pairs)
+	p := Dedupe(pairs)
 
+	// assemble response
 	response := &AssetResponse{
-		Name:            tokenName.(string),
-		Symbol:          tokenSymbol.(string),
-		ContractAddress: tokenContractAddress.(string),
-		VolumeUSD:       tokenVolumeUSD.(string),
+		Name:            tokenName,
+		Symbol:          tokenSymbol,
+		ContractAddress: tokenContractAddress,
+		VolumeUSD:       tokenVolumeUSD,
 		Pools:           p,
 	}
 
+	// return response
 	ctx.IndentedJSON(http.StatusOK, response)
 }
 
-func getBlockByNumber(ctx *gin.Context) {
+func GetBlockByNumber(ctx *gin.Context) {
 
+	// prep gql query
 	blockNumber := ctx.Param("blocknumber")
 	query := fmt.Sprintf(`
 	{
@@ -146,10 +169,11 @@ func getBlockByNumber(ctx *gin.Context) {
 		}
 	}`, blockNumber)
 
+	// full send
 	client := graphql.NewClient(graphAPI)
 	request := graphql.NewRequest(query)
 
-	var result map[string]interface{}
+	var result BlockDetails
 
 	if err := client.Run(
 		context.Background(),
@@ -159,74 +183,49 @@ func getBlockByNumber(ctx *gin.Context) {
 		return
 	}
 
-	transactionData := result["transactions"].([]interface{})
-
+	// empty list to collect assets that were traded
 	var assets []string
+	// empty list to collect swaps that were made
 	var swaps []string
 
-	// unpack transactions[]
-	for _, txs := range transactionData {
-
-		var in string
-		var out string
-		var inAmount string
-		var outAmount string
-
-		if swap, ok := txs.(map[string]interface{}); ok {
-
-			// unpack swaps[]
-			for _, v := range swap {
-				if data, ok := v.([]interface{}); ok {
-
-					// unpack swap{} in swaps[]
-					for _, v := range data {
-						if s, ok := v.(map[string]interface{}); ok {
-
-							inAmount = s["amount0"].(string)
-							outAmount = s["amount1"].(string)
-
-							// unpack token0{} in swap{}
-							if symbol, ok := s["token0"].(map[string]interface{}); ok {
-								in = symbol["symbol"].(string)
-							}
-
-							// unpack token0{} in swap{}
-							if symbol, ok := s["token1"].(map[string]interface{}); ok {
-								out = symbol["symbol"].(string)
-							}
-
-							// TODO: left hand number is always negative and right hand number is always positive
-							currentSwap := fmt.Sprintf("%s %s : %s %s", in, inAmount, out, outAmount)
-							swaps = append(swaps, currentSwap)
-							assets = append(assets, in, out)
-						}
-					}
-
-				}
+	// parse transactions
+	for _, txs := range result.Transactions {
+		if len(txs.Swaps) > 0 {
+			for _, swap := range txs.Swaps {
+				in := swap.Token0.Symbol
+				out := swap.Token1.Symbol
+				inAmount := swap.Amount0
+				outAmount := swap.Amount1
+				currentSwap := fmt.Sprintf("%s %s : %s %s", in, inAmount, out, outAmount)
+				swaps = append(swaps, currentSwap)
+				assets = append(assets, in, out)
 			}
 		}
 	}
 
+	// sort + dedupe assets
 	sort.Strings(assets)
-	a := dedupe(assets)
+	a := Dedupe(assets)
 
+	// assemble response
 	response := &BlockResponse{
 		BlockHeight:   blockNumber,
 		Swaps:         swaps,
 		AssetsSwapped: a,
 	}
 
+	// return response
 	ctx.IndentedJSON(http.StatusOK, response)
 }
 
-func setup() {
+func initWebserver() {
 	gin.SetMode("release")
 	app := gin.Default()
-	app.GET("/asset/:id", getAssetByID)
-	app.GET("/block/:blocknumber", getBlockByNumber)
+	app.GET("/asset/:id", GetAssetByID)
+	app.GET("/block/:blocknumber", GetBlockByNumber)
 	app.Run("localhost:8000")
 }
 
 func main() {
-	setup()
+	initWebserver()
 }
